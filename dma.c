@@ -1,6 +1,7 @@
 #include "xaxidma.h"
 #include "xparameters.h"
 #include "xdebug.h"
+#include "xscugic.h"
 
 #define DDR_BASE_ADDR XPAR_PS7_RAM_0_S_AXI_BASEADDR
 #define MEM_BASE_ADDR	(DDR_BASE_ADDR + 0x1000000)
@@ -13,7 +14,7 @@
 #define RX_BUFF_BASE		(MEM_BASE_ADDR + 0x00300000)/*RX_BUFFER_BASE indica donde inicia el primer buffer del buffer space*/
 #define RX_BUFFER_HIGH		(MEM_BASE_ADDR + 0x004FFFFF)
 
-#define PKT_LENGTH	0x20 /*El PKT_ LENGTH es el tamaño de los datos que cargamos en cada BD. 0x20h son 32 bita*/
+#define PKT_LENGTH	40 /*El PKT_ LENGTH es el tamaño de los datos que cargamos en cada BD. 0x20h son 32 bita*/
 #define BD_NUM		12/*Numero de BD en cada ring*/
 
 // MM2S CONTROL
@@ -34,12 +35,44 @@
 #define S2MM_TAILDESC               0x40    // must align 0x40 addresses
 #define S2MM_TAILDESC_MSB           0x44    // unused with 32bit addresses
 
-int main(void){
+#define S2MM_OFFSET	0x34
+
+/*INTERRUPTS*/
+XAxiDma_Config *Config;
+XAxiDma AxiSGDma;
+static XScuGic InterruptController;
+volatile int Error = 0;
+volatile int TxDone = 0;
+volatile int RxDone = 0;
+#define RESET_TIMEOUT_COUNTER	10000
+#define TX_INTR_ID		XPAR_FABRIC_AXI_DMA_0_MM2S_INTROUT_INTR/*TX interrupt*/
+#define RX_INTR_ID		XPAR_FABRIC_AXI_DMA_0_S2MM_INTROUT_INTR/*RX interrupt*/
+#define INTC_DEVICE_ID	XPAR_SCUGIC_SINGLE_DEVICE_ID
+#define INTC		XScuGic
+#define INTC_HANDLER	XScuGic_InterruptHandler
+
+static void TxIntrHandler(void *Callback);
+static void TxCallBack(XAxiDma_BdRing * TxRingPtr);
+static void RxIntrHandler(void *Callback);
+static void RxCallBack(XAxiDma_BdRing * RxRingPtr);
+static int SetupIntrSystem(INTC * IntcInstancePtr,
+			   XAxiDma * AxiDmaPtr, u16 TxIntrId, u16 RxIntrId);
 
 
-	int Status;
-	XAxiDma_Config *Config;
-	XAxiDma AxiSGDma;
+
+int main(void)
+{
+
+
+	Status = SetupIntrSystem(&InterruptController, &AxiSGDma, TX_INTR_ID, RX_INTR_ID);
+	XAxiDma_IntrEnable(&AxiSGDma, XAXIDMA_IRQ_ALL_MASK, XAXIDMA_DEVICE_TO_DMA); // RX
+	XAxiDma_IntrEnable(&AxiSGDma, XAXIDMA_IRQ_ALL_MASK, XAXIDMA_DMA_TO_DEVICE); // TX
+
+
+	if (Status != XST_SUCCESS) {
+		xil_printf("Failed intr setup\r\n");
+		return XST_FAILURE;
+	}
 	u8 *RxPacket = (u8 *)RX_BUFF_BASE;/*Lo que escribamos en RxPacket se escribirá en el RX_BUFF_BASE*/
 									  /*Aqui se almacenaran los paquetes del ADC*/
 	Xil_DCacheInvalidateRange((UINTPTR)RxPacket, PKT_LENGTH*BD_NUM); /*Esto no lo tengo claro*/
@@ -91,101 +124,231 @@ int main(void){
 
 
 	for(int i=0; i<BD_NUM;i++){/*Con esto asignas las direcciones y las longitudes de cada uno de los buffers de los anillos de buffer*/
-		Status = XAxiDma_BdSetBufAddr(TxBDptr, TxBlockAdd);
-		if(Status != XST_SUCCESS ){
-			xil_printf("Error al asignar el address del TX BD numero: %d n\r", i);
+		  	XAxiDma_BdClear(TxBDptr);
+		    XAxiDma_BdClear(RxBDptr);
+			Status = XAxiDma_BdSetBufAddr(TxBDptr, TxBlockAdd);
+			if(Status != XST_SUCCESS ){
+				xil_printf("Error al asignar el address del TX BD numero: %d n\r", i);
+			}
+			Status = XAxiDma_BdSetLength(TxBDptr, PKT_LENGTH, TxBDringptr->MaxTransferLen);
+			if(Status != XST_SUCCESS ){
+					xil_printf("Error al asignar la longitud del TX BD numero: %d n\r", i);
+				}
+			XAxiDma_BdSetCtrl(TxBDptr, XAXIDMA_BD_CTRL_ALL_MASK);
+
+			Status = XAxiDma_BdSetBufAddr(RxBDptr, RxBlockAdd);
+			if(Status != XST_SUCCESS ){
+					xil_printf("Error al asignar el address del RX BD numero: %d n\r", i);
+				}
+			Status = XAxiDma_BdSetLength(RxBDptr, PKT_LENGTH, RxBDringptr->MaxTransferLen);
+			if(Status != XST_SUCCESS ){
+					xil_printf("Error al asignar la longitud del RX BD numero: %d n\r", i);
+				}
+			XAxiDma_BdSetCtrl(RxBDptr, XAXIDMA_BD_STS_RXEOF_MASK);
+
+			TxBlockAdd += PKT_LENGTH; //Increase Address by packet length
+			RxBlockAdd += PKT_LENGTH;
+
+			/*Move to the next BD in the BD Ring*/
+			TxBDptr = (XAxiDma_Bd *)XAxiDma_BdRingNext(TxBDringptr, TxBDptr);
+			RxBDptr = (XAxiDma_Bd *)XAxiDma_BdRingNext(RxBDringptr, RxBDptr);
+
+
+
 		}
-		Status = XAxiDma_BdSetLength(TxBDptr, PKT_LENGTH, TxBDringptr->MaxTransferLen);
-		if(Status != XST_SUCCESS ){
-				xil_printf("Error al asignar la longitud del TX BD numero: %d n\r", i);
-			}
-		XAxiDma_BdSetCtrl(TxBDptr, XAXIDMA_BD_CTRL_ALL_MASK);
 
-		Status = XAxiDma_BdSetBufAddr(RxBDptr, RxBlockAdd);
-		if(Status != XST_SUCCESS ){
-				xil_printf("Error al asignar el address del RX BD numero: %d n\r", i);
-			}
-		Status = XAxiDma_BdSetLength(RxBDptr, PKT_LENGTH, RxBDringptr->MaxTransferLen);
-		if(Status != XST_SUCCESS ){
-				xil_printf("Error al asignar la longitud del RX BD numero: %d n\r", i);
-			}
-		TxBlockAdd += PKT_LENGTH; //Increase Address by packet length
-		RxBlockAdd += PKT_LENGTH;
+	// Flush entire BD rings
+	Xil_DCacheFlushRange((UINTPTR)RX_BD_SPACE_BASE, XAXIDMA_BD_MINIMUM_ALIGNMENT * BD_NUM);
+	Xil_DCacheFlushRange((UINTPTR)TX_BD_SPACE_BASE, XAXIDMA_BD_MINIMUM_ALIGNMENT * BD_NUM);
 
-		/*Move to the next BD in the BD Ring*/
-		TxBDptr = (XAxiDma_Bd *)XAxiDma_BdRingNext(TxBDringptr, TxBDptr);
-		RxBDptr = (XAxiDma_Bd *)XAxiDma_BdRingNext(RxBDringptr, RxBDptr);
+	// Flush data buffers
+	Xil_DCacheFlushRange((UINTPTR)RX_BUFF_BASE, PKT_LENGTH * BD_NUM);
+	Xil_DCacheFlushRange((UINTPTR)TX_BUFF_BASE, PKT_LENGTH * BD_NUM);
 
-		Xil_DCacheFlushRange((UINTPTR)TX_BD_SPACE_BASE, XAXIDMA_BD_MINIMUM_ALIGNMENT*BD_NUM);//Size of BD * Number of BD
-		Xil_DCacheFlushRange((UINTPTR)RX_BD_SPACE_BASE, XAXIDMA_BD_MINIMUM_ALIGNMENT*BD_NUM);//Size of BD * Number of BD
+	/*Preprocessing. Pasamos al los BD Rings los BDs definidos*/
+	Status = XAxiDma_BdRingToHw(RxBDringptr, BD_NUM, RxBDptr);//Calculates the last BD in the BD ring to gather all the required info
+	if (Status != XST_SUCCESS) {
+	 xil_printf("Failed to queue BD to HW\n\r");
+	    return XST_FAILURE;
+	}
+	/*DEBUGGING*/
+	XAxiDma_Bd *RxBDptr_original;
+	RxBDptr_original = RxBDptr;
 
-		/*Preprocessing. Pasamos al los BD Rings los BDs definidos*/
-		Status = XAxiDma_BdRingToHw(RxBDringptr, BD_NUM, RxBDptr);//Calculates the last BD in the BD ring to gather all the required info
-		Status = XAxiDma_BdRingToHw(TxBDringptr, BD_NUM, TxBDptr);
+	xil_printf("Pasado a HW BD @%p\n\r", RxBDptr);
+	xil_printf("RxBDptr_original: @%p\n\r", RxBDptr_original);
 
 
-}
+
+	Status = XAxiDma_BdRingToHw(TxBDringptr, BD_NUM, TxBDptr);
+	if (Status != XST_SUCCESS) {
+	    xil_printf("Failed to queue BD to HW\n\r");
+	    return XST_FAILURE;
+	}
+
+	//Miramos el registro de control S2MM (S2MMCR)
+	u32 Statusdma = XAxiDma_ReadReg(XPAR_AXI_DMA_0_BASEADDR, S2MM_CONTROL_REGISTER);
+	if(Statusdma & 0x1){
+		xil_printf("Start DMA operations\n\r");
+	}else{
+		xil_printf("Stopped DMA operations\n\r");
+	}
+
+	Status = XAxiDma_BdRingStart(RxBDringptr);
+	if (Status != XST_SUCCESS) {
+	    xil_printf("Failed to start S2MM\n\r");
+	    return XST_FAILURE;
+	}
+	Status = XAxiDma_BdRingStart(TxBDringptr);
+	if (Status != XST_SUCCESS) {
+	    xil_printf("Failed to start S2MM\n\r");
+	    return XST_FAILURE;
+	}
+    if(Status != XST_SUCCESS ){
+		xil_printf("Failure when activating reception channel: %d n\r");
+    }
+
+    int bd_count = 0;
 		while(1){
 
-			u32 Statusdma = XAxiDma_ReadReg(XPAR_AXI_DMA_0_DEVICE_ID, S2MM_OFFSET);
-			//Miro el estado de SS2M antes de aceptar datos
-			if(Statusdma & XAXIDMA_HALTED_MASK){
-				xil_printf("DMA S2MM CHANNEL HALTED!\n\r");
-			}
-			if(Statusdma & XAXIDMA_IDLE_MASK){
-				xil_printf("DMA S2MM CHANNEL IDLE!\n\r");
-			}
+			u32 dma_ctrl = XAxiDma_ReadReg(XPAR_AXI_DMA_0_BASEADDR, S2MM_CONTROL_REGISTER);
+			xil_printf("S2MM control reg: 0x%08x\n\r", dma_ctrl);
 
-		    Status = XAxiDma_BdRingStart(RxBDringptr);
-		    if(Status != XST_SUCCESS ){
-				xil_printf("Error al activar el canal de recepcion: %d n\r");
+			u32 s2mm_status = XAxiDma_ReadReg(XPAR_AXI_DMA_0_BASEADDR, S2MM_OFFSET);
+
+			//xil_printf("S2MM Status: 0x%08x\n\r", s2mm_status);
+
+			if (s2mm_status & XAXIDMA_HALTED_MASK) xil_printf(" - HALTED\n\r");
+			if (s2mm_status & XAXIDMA_IDLE_MASK) xil_printf(" - IDLE\n\r");
+			if (s2mm_status & XAXIDMA_ERR_INTERNAL_MASK) xil_printf(" - Internal error\n\r");
+			if (s2mm_status & XAXIDMA_ERR_SLAVE_MASK) xil_printf(" - Slave error\n\r");
+			if (s2mm_status & XAXIDMA_ERR_DECODE_MASK) xil_printf(" - Decode error\n\r");
+
+
+		    // 1. Wait for BDs to be processed
+			//while((XAxiDma_Busy(&AxiSGDma, XAXIDMA_DMA_TO_DEVICE))||(XAxiDma_Busy(&AxiSGDma, XAXIDMA_DEVICE_TO_DMA)));
+
+
+			while (bd_count == 0) {
+			    bd_count = XAxiDma_BdRingFromHw(RxBDringptr, BD_NUM, &RxBDptr);/*Devuelveme los BDs que el HW ha terminado de usar*/
+			    //xil_printf("Desde HW BD @%p\n\r", RxBDptr);
 		    }
 
-		    //Miro el estado tras aceptar datos
 
-			if(Statusdma & XAXIDMA_HALTED_MASK){
-					xil_printf("DMA S2MM CHANNEL HALTED!\n\r");
-			}
-			if(Statusdma & XAXIDMA_IDLE_MASK){
-				xil_printf("DMA S2MM CHANNEL IDLE!\n\r");
-			}
+			xil_printf("%d BDs were completed\n\r", bd_count);
+
+		    // 2. Invalidate cache for received data
+		    Xil_DCacheInvalidateRange(RX_BUFF_BASE, PKT_LENGTH * bd_count);
 
 
+		      UINTPTR rx_addr = RX_BUFF_BASE;
+		      for (int b = 0; b < bd_count; b++) {
+		          u32 *data = (u32 *)rx_addr;
+		          xil_printf("BD %d:\n\r", b);
+		          for (int i = 0; i < PKT_LENGTH / 4; i++) {
+		              xil_printf("Dato %d: %08x\n\r", i, data[i]);
+		          }
+		          rx_addr += PKT_LENGTH;
+		      }
 
-			//Receive data from the ADC
-			//For further transmisión copy RX_BUFFER_SPACE content in TX_BUFFER_SPACE
-			
+		      XAxiDma_Bd *CurBd = RxBDptr;
+		      /*
+		      for (int i = 0; i < bd_count; i++) {
+		          u32 status = XAxiDma_BdGetSts(CurBd);
+		          xil_printf("BD %d status = 0x%08x\r\n", i, status);
 
-    		u32 mm2s_status = XAxiDma_ReadReg(XPAR_AXI_DMA_0_BASEADDR, XAXIDMA_SR_OFFSET);
+		          CurBd = XAxiDma_BdRingNext(RxBDringptr, CurBd);
+		      }
+		      */
 
-
-    		if (mm2s_status & XAXIDMA_IDLE_MASK)
-    		    xil_printf("DMA MM2S is IDLE\r\n");
-    		else
-    		    xil_printf("DMA MM2S is BUSY\r\n");
-
-
-		      while(XAxiDma_Busy(&AxiSGDma, XAXIDMA_DEVICE_TO_DMA));
-
-
-		        Xil_DCacheInvalidateRange(RX_BUFF_BASE, PKT_LENGTH*BD_NUM);
+		      /*DEBUGGING*/
+		      int valid_bd_count = 0;
+		      XAxiDma_Bd *ValidBdPtr = RxBDptr;
 
 
-		        u32 *data = (u32 *)RX_BUFF_BASE;
-		        for(int i=0; i<PKT_LENGTH/4; i++) {
-		            xil_printf("DatA %d: %08x\n\r", i, data[i]);
-		        }
+		      for (int i = 0; i < bd_count; i++) {
+		          u32 status = XAxiDma_BdGetSts(CurBd);
+		          xil_printf("BD %d status = 0x%08x\r\n", i, status);
 
-		        // Restart DMA for reception
+		          if (status & XAXIDMA_BD_STS_COMPLETE_MASK) {
+		              valid_bd_count++;
+		              ValidBdPtr = CurBd; 
+		          } else {
+		              xil_printf("BD %d not completed, will not be freed\n\r", i);
+		              break; 
+		          }
 
-		        Status = XAxiDma_BdRingStart(TxBDringptr);//Brings to HW
-		        Status = XAxiDma_BdRingStart(RxBDringptr);
+		          CurBd = XAxiDma_BdRingNext(RxBDringptr, CurBd);
+		      }
+
+		      if (valid_bd_count > 0) {
+		          Status = XAxiDma_BdRingFree(RxBDringptr, valid_bd_count, RxBDptr);
+		          if (Status != XST_SUCCESS) {
+		              xil_printf("Failed to free RX BD\r\n");
+		          }
+		      } else {
+		          xil_printf("No BD valid to be freed\n\r");
+		      }
+
+		      if (valid_bd_count > 0) {
+		          Status = XAxiDma_BdRingAlloc(RxBDringptr, valid_bd_count, &RxBDptr);
+		          if (Status != XST_SUCCESS) {
+		              xil_printf("RX BD reallocate failed\n\r");
+		              break;
+		          }
+
+		      }
+
+		      /*DEBUGGING*/
+
+/*
+
+			// 4. Free Ring BDs
+				Status = XAxiDma_BdRingFree(RxBDringptr, bd_count, RxBDptr);
+				if (Status != XST_SUCCESS) {
+				    xil_printf("Error al liberar los RX BDs\r\n");
+				}
+				// 5. Reserva de nuevo BDs para la próxima recepción
+				Status = XAxiDma_BdRingAlloc(RxBDringptr, bd_count, &RxBDptr);
+				if (Status != XST_SUCCESS) {
+					xil_printf("Error al realojar RX BD\n\r");
+					break;
+				}
+
+
+*/
+				// 6. Reconfigure BDs
+				UINTPTR RxBlockAdd = RX_BUFF_BASE;
+				XAxiDma_Bd *BdPtr = RxBDptr;
+
+
+
+				for (int i = 0; i < valid_bd_count; i++) {
+				    Status = XAxiDma_BdSetLength(BdPtr, PKT_LENGTH, RxBDringptr->MaxTransferLen);
+				    if (Status != XST_SUCCESS) xil_printf("Error: SetLength BD %d\n\r", i);
+
+				    XAxiDma_BdSetCtrl(BdPtr, 0); 
+				    
+
+				    BdPtr = XAxiDma_BdRingNext(RxBDringptr, BdPtr);
+				}
+
+				// 7. Refresh cache for new BDs
+				Xil_DCacheFlushRange(RX_BUFF_BASE, PKT_LENGTH * valid_bd_count);
+				Xil_DCacheFlushRange((UINTPTR)RX_BD_SPACE_BASE, XAXIDMA_BD_MINIMUM_ALIGNMENT * valid_bd_count);
+
+
+				// 8. Resend the reused BDs to HW
+				Status = XAxiDma_BdRingToHw(RxBDringptr, valid_bd_count, RxBDptr);
+				if (Status != XST_SUCCESS) {
+					xil_printf("Error al enviar BDs reutilizados al HW\n\r");
+					break;
+		            }
+					RxBDptr = BdPtr;
+
 		}
 
 
 
-
-
-
+	return XST_SUCCESS;
 }
-
