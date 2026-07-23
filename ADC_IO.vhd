@@ -1,3 +1,6 @@
+--Empleamos TDM para multiplexar chirps de la antena TX1 con chirps de la antena TX2
+--El IC ADF5904 proporciona cuatro canales diferenciales, pero virtualmente debemos de generar 
+--8 salidas de datos: 4 canales de IF de TX1 y 4 canales de IF de TX2
 --Convierte señales de entrada differential a single-ended.
 --Registra los bits de cada canal empleando IDDR.
 --Combina las salidas de cada IDDR en muestras para cada canal
@@ -16,19 +19,26 @@ entity ADC_IO is
         Adc_Resolution:             integer:=12
     );
     Port (
-        fclk_p_IN:          in std_logic;
-        fclk_n_IN:          in std_logic;
-        dclk_p_IN:          in std_logic;
-        dclk_n_IN:          in std_logic;
-        data_p_IN:          in std_logic_vector((Adc_Num_Channels*Adc_Wire_Interface)-1 downto 0);
-        data_n_IN:          in std_logic_vector((Adc_Num_Channels*Adc_Wire_Interface)-1 downto 0);
-        aresetn:            in std_logic;
-        dclk_buffered:      out std_logic;--Buffered 120 MHz clock 
-        data_a_OUT:         out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from channel A
-        data_b_OUT:         out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from channel A
-        data_c_OUT:         out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from channel A
-        data_d_OUT:         out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from channel A       
-        adc_data_valid:     out std_logic
+        aresetn:                in std_logic;
+        muxout:                 in std_logic;--Indica inicio de cada rampa
+        fclk_p_IN:              in std_logic;--FCLK. Frame Clock
+        fclk_n_IN:              in std_logic;
+        dclk_p_IN:              in std_logic;--DCLK. Data Clock
+        dclk_n_IN:              in std_logic;
+        data_p_IN:              in std_logic_vector((Adc_Num_Channels*Adc_Wire_Interface)-1 downto 0);
+        data_n_IN:              in std_logic_vector((Adc_Num_Channels*Adc_Wire_Interface)-1 downto 0);
+        
+        dclk_buffered:          out std_logic;--Buffered 120 MHz clock 
+        data_ch1_tx1:           out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from ch1 corresponding to tx1 antenna
+        data_ch1_tx2:           out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from ch1 corresponding to tx2 antenna
+        data_ch2_tx1:           out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from ch2 corresponding to tx1 antenna
+        data_ch2_tx2:           out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from ch2 corresponding to tx2 antenna     
+        data_ch3_tx1:           out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from ch3 corresponding to tx1 antenna
+        data_ch3_tx2:           out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from ch3 corresponding to tx2 antenna
+        data_ch4_tx1:           out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from ch4 corresponding to tx1 antenna
+        data_ch4_tx2:           out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from ch4 corresponding to tx2 antenna
+        adc_data_valid_tx1:     out std_logic;  
+        adc_data_valid_tx2:     out std_logic
   );
 end ADC_IO;
 
@@ -55,12 +65,15 @@ signal data_rising_edge: std_logic_vector((Adc_Num_Channels * Adc_Wire_Interface
 signal data_falling_edge: std_logic_vector((Adc_Num_Channels * Adc_Wire_Interface)-1 downto 0);
 signal dclk_bufio: std_logic;
 signal dclk_bufg: std_logic;
+signal muxout_reg:  std_logic;
+signal muxout_valid:    std_logic;
+signal mux_select: std_logic:= '0';--Selector del multiplexador TDM
 
 --IDDR
 signal IDDR_reset: std_logic;
 --reset signal synchronization signals
-signal aresetn_reg_dclk_bufg, aresetn_reg_fclk: std_logic_vector(1 downto 0):=(others => '0');
-signal sync_aresetn_dclk_bufg,sync_resetn_fclk: std_logic;
+signal aresetn_reg_dclk_bufio, aresetn_reg_dclk_bufg, aresetn_reg_fclk: std_logic_vector(1 downto 0):=(others => '0');
+signal sync_aresetn_dclk_bufio, sync_aresetn_dclk_bufg,sync_resetn_fclk: std_logic;
 
 --bufg synchronization signals
 signal data_rising_edge_bufg: std_logic_vector((Adc_Num_Channels * Adc_Wire_Interface)-1 downto 0);
@@ -75,18 +88,15 @@ signal sample_array : sample_array_t := (others => (others => '0'));
 signal pair_count: unsigned(2 downto 0);
 signal adc_data_valid_reg: std_logic;
 
+--Sample former signals
+signal bit_index : integer range 0 to 10 := 0;
+signal sample_buffer : sample_array_t;
+signal sample        : sample_array_t;
+signal sample_valid  : std_logic;
+
 begin
 
 
---Proceso de sincronización de reset con el dominio del reloj
-reset_fclk_process: process(fclk)
-begin
-    if rising_edge(fclk) then
-        aresetn_reg_fclk(0)<= aresetn;
-        aresetn_reg_fclk(1) <= aresetn_reg_fclk(0);
-    end if;
-end process reset_fclk_process;
-sync_resetn_fclk <= aresetn_reg_fclk(1);
 
 --Instanciamos elecrtical converters para pasar de una señal diferencial a una single ended interna en la PL fabric
 --1) Clock Buffers
@@ -132,7 +142,28 @@ BUFG_dclk : BUFG
 
 dclk_buffered <= dclk_bufg;
 
+
 --Proceso de sincronización de reset con el dominio del reloj
+--reset_fclk_process: process(fclk)
+--begin
+--    if rising_edge(fclk) then
+--        aresetn_reg_fclk(0)<= aresetn;
+--        aresetn_reg_fclk(1) <= aresetn_reg_fclk(0);
+--    end if;
+--end process reset_fclk_process;
+--sync_resetn_fclk <= aresetn_reg_fclk(1);
+
+--Proceso de sincronización de reset con el dominio del reloj
+reset_dclk_bufio_process: process(dclk_bufio)
+begin
+    if rising_edge(dclk_bufio) then
+        aresetn_reg_dclk_bufio(0)<= aresetn;
+        aresetn_reg_dclk_bufio(1) <= aresetn_reg_dclk_bufio(0);
+    end if;
+end process reset_dclk_bufio_process;
+sync_aresetn_dclk_bufio <= aresetn_reg_dclk_bufio(1);
+IDDR_reset <= not(sync_aresetn_dclk_bufio);--Reset IDDR es activo a nivel alto
+
 reset_dclk_bufg_process: process(dclk_bufg)
 begin
     if rising_edge(dclk_bufg) then
@@ -141,7 +172,7 @@ begin
     end if;
 end process reset_dclk_bufg_process;
 sync_aresetn_dclk_bufg <= aresetn_reg_dclk_bufg(1);
-IDDR_reset <= not(sync_aresetn_dclk_bufg);--Reset IDDR es activo a nivel alto
+
 --2) Data Buffers
 --Generamos los data buffers usando un bucle for
 DATA_IBUFDS: for n in (Adc_Num_Channels * Adc_Wire_Interface)-1 downto 0 generate
@@ -192,48 +223,73 @@ begin
         data_falling_edge_bufg <= data_falling_edge;
     end if;
 end process BUFG_Synchronization_process;
+
+MUX_Select_Process: process(dclk_bufg, sync_aresetn_dclk_bufg)--Alterna la salida de un multiplexor 1:2 en funcion de la señal muxout para habilitar TDM   
+begin
+    if sync_aresetn_dclk_bufg = '0' then
+        muxout_reg <= '0';
+        muxout_valid <= '0';
+    elsif rising_edge(dclk_bufg) then
+        muxout_reg <= muxout;
+        if muxout_valid = '1' then
+            mux_select <= not(mux_select);
+        end if;
+    end if;
+    muxout_valid <= muxout and not(muxout_reg);
+end process MUX_Select_Process;
 --============================================================================================================
 --Combinamos rising y falling edge en una sola palabra
 --IDDR saca los bits pares en Q1 y los impares en Q2. Empleando un shift register metemos en cada ciclo
 --2 pares de bits de modo que al cabo de 6 ciclos tenemos una muestra completa
 --============================================================================================================
 
-Data_Combiner_process: process(dclk_bufg, sync_aresetn_dclk_bufg)
-variable next_shift: shift_reg_array_t;
+SAMPLE_COMBINER_Process: process(dclk_bufg, sync_aresetn_dclk_bufg)--Toma los datos IDDR y los combina en una sola palabra
+    variable next_sample: sample_array_t;
 begin
     if sync_aresetn_dclk_bufg = '0' then
-        shift_reg_array <= (others => (others => '0'));
-        sample_array    <= (others => (others => '0'));
-        pair_count <= (others => '0');
-        adc_data_valid_reg <= '0';
+            sample_buffer <= (others => (others => '0'));
+            sample       <= (others => (others => '0'));
+            bit_index     <= 0;
+            adc_data_valid_tx1 <= '0';
+            adc_data_valid_tx2 <= '0';
     elsif rising_edge(dclk_bufg) then
-        adc_data_valid_reg <= '0';
-        -- Desplazamiento para los 4 canales
-            for i in 0 to 3 loop
-                next_shift(i) := shift_reg_array(i)(9 downto 0) & 
-                                 data_rising_edge_bufg(i) & 
-                                 data_falling_edge_bufg(i);
-                                 
-                shift_reg_array(i) <= next_shift(i);
-            end loop;
-
-        if pair_count = 5 then
-            for i in 0 to 3 loop
-                sample_array(i)<= next_shift(i);--Una vez han pasado los 6 ciclos la señal sample contiene todos los bits de una muestra completa
-            end loop;
+    
+        adc_data_valid_tx1 <= '0';
+        adc_data_valid_tx2 <= '0';
+        next_sample := sample_buffer;
+        for channel in 0 to 3 loop 
+            --Introducimos los dos bits recuperados por el IDDR
+            next_sample(channel)(bit_index) := data_rising_edge_bufg(channel);
+            next_sample(channel)(bit_index +1) := data_falling_edge_bufg(channel);
             
-            adc_data_valid_reg <= '1';
-            pair_count <= (others => '0');
+        end loop;
+            sample_buffer <= next_sample;
+            
+            if bit_index = 10 then
+            --Ya tenemos d0, ... d11
+            sample <= sample_buffer;
+            --TDM
+            if mux_select = '0' then 
+                data_ch1_tx1 <= next_sample(0);
+                data_ch2_tx1 <= next_sample(1);
+                data_ch3_tx1 <= next_sample(2);
+                data_ch4_tx1 <= next_sample(3);
+                adc_data_valid_tx1 <= '1';
+            else
+                data_ch1_tx2 <= next_sample(0);
+                data_ch2_tx2 <= next_sample(1);
+                data_ch3_tx2 <= next_sample(2);
+                data_ch4_tx2 <= next_sample(3);
+                adc_data_valid_tx2 <= '1';
+            end if;
 
-        else
-            pair_count <= pair_count + 1;
-        end if;
+            bit_index <= 0;
+            
+            else 
+                bit_index <= bit_index + 2;
+            end if;
     end if;
-end process Data_Combiner_process;
+end process SAMPLE_COMBINER_Process;
 
-adc_data_valid <= adc_data_valid_reg;
-data_a_OUT <= sample_array(0);
-data_b_OUT <= sample_array(1);
-data_c_OUT <= sample_array(2);
-data_d_OUT <= sample_array(3);
+
 end Behavioral;
