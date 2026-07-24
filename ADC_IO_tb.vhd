@@ -1,6 +1,3 @@
---Se generan 5 valores de datos para cada canal del ADC que se incrementan en 1 en cada ciclo de reloj
---data_p_in(0): 0,1,2,3,4; data_p_in(1): 5,6,7,8,9; data_p_in(2): 10,11,12,13,14; data_p_in(3): 15,16,17,18,19
-
 
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
@@ -24,19 +21,26 @@ component ADC_IO is
         Adc_Resolution:             integer:=12
     );
     Port (
-        fclk_p_IN:          in std_logic;
-        fclk_n_IN:          in std_logic;
-        dclk_p_IN:          in std_logic;
-        dclk_n_IN:          in std_logic;
-        data_p_IN:          in std_logic_vector((Adc_Num_Channels*Adc_Wire_Interface)-1 downto 0);
-        data_n_IN:          in std_logic_vector((Adc_Num_Channels*Adc_Wire_Interface)-1 downto 0);
-        aresetn:            in std_logic;
-        dclk_buffered:      out std_logic;--Buffered 120 MHz clock 
-        data_a_OUT:         out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from channel A
-        data_b_OUT:         out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from channel A
-        data_c_OUT:         out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from channel A
-        data_d_OUT:         out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from channel A       
-        adc_data_valid:     out std_logic
+        aresetn:                in std_logic;
+        muxout:                 in std_logic;--Indica inicio de cada rampa
+        fclk_p_IN:              in std_logic;--FCLK. Frame Clock
+        fclk_n_IN:              in std_logic;
+        dclk_p_IN:              in std_logic;--DCLK. Data Clock
+        dclk_n_IN:              in std_logic;
+        data_p_IN:              in std_logic_vector((Adc_Num_Channels*Adc_Wire_Interface)-1 downto 0);
+        data_n_IN:              in std_logic_vector((Adc_Num_Channels*Adc_Wire_Interface)-1 downto 0);
+        
+        dclk_buffered:          out std_logic;--Buffered 120 MHz clock 
+        data_ch1_tx1:           out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from ch1 corresponding to tx1 antenna
+        data_ch1_tx2:           out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from ch1 corresponding to tx2 antenna
+        data_ch2_tx1:           out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from ch2 corresponding to tx1 antenna
+        data_ch2_tx2:           out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from ch2 corresponding to tx2 antenna     
+        data_ch3_tx1:           out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from ch3 corresponding to tx1 antenna
+        data_ch3_tx2:           out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from ch3 corresponding to tx2 antenna
+        data_ch4_tx1:           out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from ch4 corresponding to tx1 antenna
+        data_ch4_tx2:           out std_logic_vector((Adc_Resolution - 1) downto 0);--Sampled data from ch4 corresponding to tx2 antenna
+        adc_data_valid_tx1:     out std_logic;  
+        adc_data_valid_tx2:     out std_logic
   );
   end component;
 
@@ -44,50 +48,123 @@ component ADC_IO is
 constant Adc_Wire_Interface: integer:= 1;
 constant Adc_Num_Channels: integer:=4;
 constant Adc_Resolution: integer:=12;
-constant fclk_period: time:=50ns;
-constant dclk_period: time:=8.33ns;
-constant data_bit_period: time:=dclk_period/2;
-constant aresetn_assert: time:=20ns;
---constant muestra_canal_a: std_logic_vector(11 downto 0):= "000000000000";
---constant muestra_canal_b: std_logic_vector(11 downto 0):= "000000000011";
---constant muestra_canal_c: std_logic_vector(11 downto 0):= "000000000110";
+constant fclk_period     : time := 50 ns;
+constant dclk_period     : time := fclk_period / 6;
+constant data_bit_period : time := fclk_period / 12;
+constant dclk_phase      : time := dclk_period / 4;
+constant muxout_pulse_width : time := fclk_period / 2;
+constant aresetn_assert  : time := 20 ns;
 
+--Patrones de prueba
+constant DATA_0A : std_logic_vector(11 downto 0) := x"A01";--Dato que deberia de aparecer en la salida data_CH1_TX1
+constant DATA_1A : std_logic_vector(11 downto 0) := x"A02";--Dato que deberia de aparecer en la salida data_CH2_TX1
+constant DATA_2A : std_logic_vector(11 downto 0) := x"A03";--Dato que deberia de aparecer en la salida data_CH3_TX1
+constant DATA_3A : std_logic_vector(11 downto 0) := x"A04";--Dato que deberia de aparecer en la salida data_CH4_TX1
+
+constant DATA_0B : std_logic_vector(11 downto 0) := x"B01";--Dato que deberia de aparecer en la salida data_CH1_TX2
+constant DATA_1B : std_logic_vector(11 downto 0) := x"B02";--Dato que deberia de aparecer en la salida data_CH2_TX2
+constant DATA_2B : std_logic_vector(11 downto 0) := x"B03";--Dato que deberia de aparecer en la salida data_CH3_TX2
+constant DATA_3B : std_logic_vector(11 downto 0) := x"B04";--Dato que deberia de aparecer en la salida data_CH4_TX2
 
 --Signal declaration
-signal fclk_p, fclk_n: std_logic;  
-signal dclk_p, dclk_n: std_logic;    
-signal aresetn: std_logic;
-signal tb_data_p: std_logic_vector((Adc_Num_Channels*Adc_Wire_Interface)-1 downto 0);
-signal tb_data_n: std_logic_vector((Adc_Num_Channels*Adc_Wire_Interface)-1 downto 0);
-signal dclk_buffered: std_logic;
-signal tb_data_a_out: std_logic_vector((Adc_Resolution - 1) downto 0);
-signal tb_data_b_out: std_logic_vector((Adc_Resolution - 1) downto 0);
-signal tb_data_c_out: std_logic_vector((Adc_Resolution - 1) downto 0);
-signal tb_data_d_out: std_logic_vector((Adc_Resolution - 1) downto 0);
-signal adc_data_valid: std_logic;
-signal muestra_canal_a: unsigned(11 downto 0) := (others => '0');
-signal muestra_canal_b: unsigned(11 downto 0) := to_unsigned(5, 12);
-signal muestra_canal_c: unsigned(11 downto 0) := to_unsigned(10, 12);
-signal muestra_canal_d: unsigned(11 downto 0) := to_unsigned(15, 12);
+signal fclk_p    : std_logic := '0';
+signal fclk_n    : std_logic := '1';
+signal dclk_p    : std_logic := '0';
+signal dclk_n    : std_logic := '1';
 
-signal sample_counter: unsigned(3 downto 0) := (others => '0');
+signal aresetn   : std_logic := '0';
+signal tb_muxout : std_logic := '0';
+signal tb_data_p : std_logic_vector((Adc_Num_Channels * Adc_Wire_Interface) - 1 downto 0) := (others => '0');
+signal tb_data_n : std_logic_vector((Adc_Num_Channels * Adc_Wire_Interface) - 1 downto 0) := (others => '1');
+
+signal dclk_buffered: std_logic;
+signal tb_data_ch1_tx1: std_logic_vector((Adc_Resolution - 1) downto 0);
+signal tb_data_ch1_tx2: std_logic_vector((Adc_Resolution - 1) downto 0);
+signal tb_data_ch2_tx1: std_logic_vector((Adc_Resolution - 1) downto 0);
+signal tb_data_ch2_tx2: std_logic_vector((Adc_Resolution - 1) downto 0);
+signal tb_data_ch3_tx1: std_logic_vector((Adc_Resolution - 1) downto 0);
+signal tb_data_ch3_tx2: std_logic_vector((Adc_Resolution - 1) downto 0);
+signal tb_data_ch4_tx1: std_logic_vector((Adc_Resolution - 1) downto 0);
+signal tb_data_ch4_tx2: std_logic_vector((Adc_Resolution - 1) downto 0);
+signal tb_adc_data_valid_tx1: std_logic;
+signal tb_adc_data_valid_tx2: std_logic;
+
+--Procedimiento de muxout
+procedure generate_muxout_pulse (
+    signal muxout_signal : out std_logic
+) is
+begin
+    muxout_signal <=
+        '1',
+        '0' after muxout_pulse_width;
+end procedure;
+--Procedimiento para cargar datos en el modulo ADC_IO
+procedure send_adc_sample (
+    signal fclk   : in  std_logic;
+    signal data_p : out std_logic_vector(
+        (Adc_Num_Channels * Adc_Wire_Interface) - 1 downto 0
+    );
+
+    constant ch1_word : in std_logic_vector(Adc_Resolution - 1 downto 0);
+    constant ch2_word : in std_logic_vector(Adc_Resolution - 1 downto 0);
+    constant ch3_word : in std_logic_vector(Adc_Resolution - 1 downto 0);
+    constant ch4_word : in std_logic_vector(Adc_Resolution - 1 downto 0)
+) is
+begin
+    -- El flanco ascendente de FCLK marca el comienzo del MSB.
+    wait until rising_edge(fclk);
+
+    -- Transmisión MSB first.
+    for bit_index in Adc_Resolution - 1 downto 0 loop
+
+        data_p(0) <= ch1_word(bit_index);
+        data_p(1) <= ch2_word(bit_index);
+        data_p(2) <= ch3_word(bit_index);
+        data_p(3) <= ch4_word(bit_index);
+
+        -- No esperamos después del último bit.
+        -- Así el procedimiento termina antes del siguiente FCLK.
+       if bit_index > 0 then
+            -- Avanzar hasta el comienzo del siguiente bit
+            wait for data_bit_period;
+       else
+            -- Esperar hasta el centro del LSB, donde lo captura DCLK
+            wait for data_bit_period / 2;
+    end if;
+
+    end loop;
+end procedure;
+
 begin
 
 --Mapping
-ADC_Module: ADC_IO port map(
-    fclk_p_IN => fclk_p,
-    fclk_n_IN => fclk_n,
-    dclk_p_IN => dclk_p, 
-    dclk_n_IN => dclk_n, 
-    data_p_IN => tb_data_p,
-    data_n_IN => tb_data_n,
-    aresetn   => aresetn,
-    dclk_buffered => dclk_buffered, 
-    data_a_OUT    => tb_data_a_out,
-    data_b_OUT    => tb_data_b_out,
-    data_c_OUT    => tb_data_c_out,
-    data_d_OUT    => tb_data_d_out,  
-    adc_data_valid => adc_data_valid 
+ADC_Module: ADC_IO 
+    generic map (
+        Adc_Wire_Interface      => Adc_Wire_Interface,
+        Adc_Num_Channels        => Adc_Num_Channels,
+        OnChip_LVDS_Termination => 1,
+        Adc_Resolution          => Adc_Resolution
+    )
+    port map(
+        aresetn            => aresetn,
+        muxout             => tb_muxout,
+        fclk_p_IN          => fclk_p,
+        fclk_n_IN          => fclk_n,
+        dclk_p_IN          => dclk_p, 
+        dclk_n_IN          => dclk_n, 
+        data_p_IN          => tb_data_p,
+        data_n_IN          => tb_data_n,
+        dclk_buffered      => dclk_buffered, 
+        data_ch1_tx1       => tb_data_ch1_tx1,
+        data_ch1_tx2       => tb_data_ch1_tx2,
+        data_ch2_tx1       => tb_data_ch2_tx1,
+        data_ch2_tx2       => tb_data_ch2_tx2,  
+        data_ch3_tx1       => tb_data_ch3_tx1,
+        data_ch3_tx2       => tb_data_ch3_tx2,
+        data_ch4_tx1       => tb_data_ch4_tx1,
+        data_ch4_tx2       => tb_data_ch4_tx2,
+        adc_data_valid_tx1 => tb_adc_data_valid_tx1,
+        adc_data_valid_tx2 => tb_adc_data_valid_tx2
 );
 --FCLK generation 20 MHz
 fclk_process: process
@@ -99,15 +176,37 @@ begin
 end process fclk_process;
 fclk_n <= not(fclk_p);
 
---DCLK generation 120 MHz
-dclk_process: process
+-- DCLK generation: 120 MHz, synchronized with FCLK
+-- First rising edge occurs one quarter DCLK period after FCLK rising edge.
+dclk_process : process
+    variable dclk_value : std_logic;
 begin
-    dclk_p <= '0';
-    wait for dclk_period/2;
-    dclk_p <= '1';
-    wait for dclk_period/2;
+    dclk_value := '0';
+    dclk_p     <= '0';
+
+    loop
+        -- Beginning of a new ADC sample
+        wait until rising_edge(fclk_p);
+
+        dclk_value := '0';
+        dclk_p     <= '0';
+
+        -- Place first DCLK rising edge in the middle of the MSB
+        wait for dclk_phase;
+
+        -- Twelve DCLK edges capture twelve DDR bits
+        for edge_index in 0 to Adc_Resolution - 1 loop
+            dclk_value := not dclk_value;
+            dclk_p     <= dclk_value;
+
+            if edge_index < Adc_Resolution - 1 then
+                wait for data_bit_period;
+            end if;
+        end loop;
+    end loop;
 end process dclk_process;
-dclk_n <= not(dclk_p);
+
+dclk_n <= not dclk_p;
 
 --Asynchronous reset generation
 aresetn_process : process
@@ -121,68 +220,73 @@ begin
     wait;
 end process aresetn_process;
 
---Data generation 
-tb_data_n<= not(tb_data_p);
-
-Data_Generation_process : process
-    variable bit_index : integer range 0 to Adc_Resolution - 1;
-
-    variable sample_a : unsigned(Adc_Resolution - 1 downto 0);
-    variable sample_b : unsigned(Adc_Resolution - 1 downto 0);
-    variable sample_c : unsigned(Adc_Resolution - 1 downto 0);
-    variable sample_d : unsigned(Adc_Resolution - 1 downto 0);
+-- Data generation
+data_process : process
 begin
-    ----------------------------------------------------------------
-    -- Estado inicial
-    ----------------------------------------------------------------
     tb_data_p <= (others => '0');
-
-    bit_index := Adc_Resolution - 1;
-
-    sample_a := to_unsigned(0,  Adc_Resolution);
-    sample_b := to_unsigned(5,  Adc_Resolution);
-    sample_c := to_unsigned(10, Adc_Resolution);
-    sample_d := to_unsigned(15, Adc_Resolution);
-
-    muestra_canal_a <= sample_a;
-    muestra_canal_b <= sample_b;
-    muestra_canal_c <= sample_c;
-    muestra_canal_d <= sample_d;
+    tb_muxout <= '0';
 
     ----------------------------------------------------------------
-    -- La liberación del reset marca una frontera de bit.
+    -- Esperar a que termine el reset
     ----------------------------------------------------------------
     wait until aresetn = '1';
 
-    while aresetn = '1' loop
-
-        -- El dato cambia en la frontera del bit.
-        tb_data_p(0) <= std_logic(sample_a(bit_index));
-        tb_data_p(1) <= std_logic(sample_b(bit_index));
-        tb_data_p(2) <= std_logic(sample_c(bit_index));
-        tb_data_p(3) <= std_logic(sample_d(bit_index));
-
-        -- Un bit DDR dura medio periodo de DCLK.
-        -- El siguiente flanco de DCLK aparece a mitad de este intervalo.
-        wait for data_bit_period;
-
-        if bit_index = 0 then
-            bit_index := Adc_Resolution - 1;
-
-            sample_a := sample_a + 1;
-            sample_b := sample_b + 1;
-            sample_c := sample_c + 1;
-            sample_d := sample_d + 1;
-
-            -- Señales auxiliares para observar las muestras en la waveform.
-            muestra_canal_a <= sample_a;
-            muestra_canal_b <= sample_b;
-            muestra_canal_c <= sample_c;
-            muestra_canal_d <= sample_d;
-        else
-            bit_index := bit_index - 1;
-        end if;
-
+    ----------------------------------------------------------------
+    -- Fuente inicial: TX1
+    ----------------------------------------------------------------
+    for sample_index in 0 to 3 loop
+        send_adc_sample(
+            fclk     => fclk_p,
+            data_p   => tb_data_p,
+            ch1_word => DATA_0A,
+            ch2_word => DATA_1A,
+            ch3_word => DATA_2A,
+            ch4_word => DATA_3A
+        );
     end loop;
-end process Data_Generation_process;
+
+    ----------------------------------------------------------------
+    -- Cambio TX1 -> TX2
+    ----------------------------------------------------------------
+    generate_muxout_pulse(tb_muxout);
+
+    for sample_index in 0 to 3 loop
+        send_adc_sample(
+            fclk     => fclk_p,
+            data_p   => tb_data_p,
+            ch1_word => DATA_0B,
+            ch2_word => DATA_1B,
+            ch3_word => DATA_2B,
+            ch4_word => DATA_3B
+        );
+    end loop;
+
+    ----------------------------------------------------------------
+    -- Cambio TX2 -> TX1
+    ----------------------------------------------------------------
+    generate_muxout_pulse(tb_muxout);
+
+    for sample_index in 0 to 3 loop
+        send_adc_sample(
+            fclk     => fclk_p,
+            data_p   => tb_data_p,
+            ch1_word => DATA_0A,
+            ch2_word => DATA_1A,
+            ch3_word => DATA_2A,
+            ch4_word => DATA_3A
+        );
+    end loop;
+
+    ----------------------------------------------------------------
+    -- Fin de la prueba
+    ----------------------------------------------------------------
+    wait until rising_edge(fclk_p);
+    tb_data_p <= (others => '0');
+
+    wait;
+end process data_process;
+
+tb_data_n <= not tb_data_p;
+
+
 end Behavioral;
